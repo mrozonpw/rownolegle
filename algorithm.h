@@ -1,24 +1,28 @@
-#ifndef ALGORITHM_H
-#define ALGORITHM_H
-#pragma once
-#include <vector>
-#include <utility>
+#ifndef SIMULATED_ANNEALING_H
+#define SIMULATED_ANNEALING_H
+
 #include <cstdint>
-#include "functions.h"
+#include <functional>
+#include <utility>
+#include <vector>
 
-// sekwencyjne SA
-std::pair<std::vector<double>, double>
-perform_sequential_algorithm(const calc_function_t& calc_value,
-                             std::vector<double> x0,
-                             uint32_t n,
-                             int a, int b);
+typedef std::function<double(const std::vector<double>&, uint32_t)> calc_function_t;
 
-// wielowątkowe SA
-std::pair<std::vector<double>, double>
-perform_threaded_algorithm(const calc_function_t& calc_value,
-                           uint32_t n,
-                           int a, int b,
-                           int num_threads);
+std::pair<std::vector<double>, double> perform_sequential_algorithm(
+    const calc_function_t& calc_value,
+    std::vector<double> starting_x_0,
+    const uint32_t n,
+    const int a,
+    const int b
+);
 
+std::pair<std::vector<double>, double> perform_parallel_algorithm_threads(
+    const calc_function_t& calc_value,
+    const std::vector<double>& starting_x_0,
+    uint32_t n,
+    int a,
+    int b,
+    int num_threads
+);
 
-#endif //ALGORITHM_H
+#endif // SIMULATED_ANNEALING_H
