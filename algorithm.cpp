@@ -1,26 +1,54 @@
 #include "algorithm.h"
+
 #include <cmath>
 #include <random>
-#include <thread>
+#include <vector>
+#include <algorithm>
+#include <iostream>
 
-// ===== SEKWENCYJNE =====
-
-std::pair<std::vector<double>, double>
-perform_sequential_algorithm(const calc_function_t& calc_value,
-                             std::vector<double> x0,
-                             uint32_t n,
-                             int a, int b)
+// Norma euklidesowa różnicy dwóch wektorów (kryterium Cauchy'ego)
+static double l2_norm_diff(const std::vector<double>& a, const std::vector<double>& b)
 {
+    const size_t n = a.size();
+    double sum = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double d = a[i] - b[i];
+        sum += d * d;
+    }
+    return std::sqrt(sum);
+}
+
+// Symulowane wyżarzanie (wersja sekwencyjna).
+// Uwaga: generowanie x* jest globalne (jednostajnie w [a,b]^n), bo tak jest w treści zadania.
+std::pair<std::vector<double>, double> perform_sequential_algorithm(const calc_function_t& calc_value,
+                                                                    std::vector<double> starting_x_0,
+                                                                    const uint32_t n,
+                                                                    const int a,
+                                                                    const int b)
+{
+    // Krok 1: parametry (wg propozycji z treści)
     const uint32_t L = 30;
     double T = 500.0;
     const double alpha = 0.3;
     const double epsT = 0.1;
 
+    const double cauchy_eps = (b - a) * std::sqrt(n / 6.0) * 1e-3; // 1000 times smaller than the expected step size
+    const uint16_t cauchy_max_steps = 10;
+    uint16_t cauchy_steps = 0;
+
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_real_distribution<double> U01(0.0, 1.0);
+    std::uniform_real_distribution<double> U(0.0, 1.0);
 
+    if (starting_x_0.size() != n)
+    {
+        starting_x_0.resize(n, 0.0);
+    }
+
+    std::vector<double> x0 = std::move(starting_x_0);
     double f_x0 = calc_value(x0, n);
+
     std::vector<double> xopt = x0;
     double f_opt = f_x0;
 
@@ -28,67 +56,128 @@ perform_sequential_algorithm(const calc_function_t& calc_value,
     {
         for (uint32_t k = 0; k < L; ++k)
         {
+            // Krok 2: losowanie x*
             std::vector<double> x_star(n);
             for (uint32_t i = 0; i < n; ++i)
-                x_star[i] = a + U01(gen) * (b - a);
-
-            double f_star = calc_value(x_star, n);
-
-            if (f_star < f_x0 ||
-                U01(gen) < std::exp((f_x0 - f_star) / T))
             {
+                const double s_i = U(gen);
+                x_star[i] = static_cast<double>(a) + s_i * (static_cast<double>(b) - static_cast<double>(a));
+            }
+
+            const double f_star = calc_value(x_star, n);
+
+            bool accepted = false;
+            double step_norm = 0.0;
+
+            // Krok 3
+            if (f_star < f_x0)
+            {
+                accepted = true;
+                if (cauchy_eps > 0.0)
+                {
+                    step_norm = l2_norm_diff(x0, x_star);
+                }
+
                 x0 = x_star;
                 f_x0 = f_star;
+
                 if (f_star < f_opt)
                 {
                     xopt = x_star;
                     f_opt = f_star;
                 }
             }
+            else
+            {
+                // Krok 4
+                const double r = U(gen);
+
+                if (r < std::exp((f_x0 - f_star) / T))
+                {
+                    accepted = true;
+                    if (cauchy_eps > 0.0)
+                    {
+                        step_norm = l2_norm_diff(x0, x_star);
+                    }
+
+                    x0 = x_star;
+                    f_x0 = f_star;
+                }
+            }
+
+            // kryterium Cauchy'ego
+            if (cauchy_eps > 0.0 && accepted)
+            {
+                if (step_norm < cauchy_eps)
+                {
+                    cauchy_steps++;
+                }
+                else{
+                    cauchy_steps = 0;
+                }
+                if(cauchy_steps > cauchy_max_steps )
+                {
+                    std::cout << std::endl << "Quitting algorithm due to Cauchy criterion" << std::endl;
+                    return {xopt, f_opt};
+                }
+            }
         }
+
+        // Krok 6
         T *= (1.0 - alpha);
     }
+
     return {xopt, f_opt};
 }
+#include <thread>
+#include <mutex>
+#include <limits>
 
-// ===== WIELOWĄTKOWE =====
-
-std::pair<std::vector<double>, double>
-perform_threaded_algorithm(const calc_function_t& calc_value,
-                           uint32_t n,
-                           int a, int b,
-                           int num_threads)
+std::pair<std::vector<double>, double> perform_parallel_algorithm_threads(
+    const calc_function_t& calc_value,
+    const std::vector<double>& starting_x_0,
+    uint32_t n,
+    int a,
+    int b,
+    int num_threads)
 {
     std::vector<std::thread> threads;
-    std::vector<std::vector<double>> best_x(num_threads);
-    std::vector<double> best_f(num_threads);
+    std::mutex best_mutex;
+
+    std::vector<double> best_x;
+    double best_f = std::numeric_limits<double>::infinity();
 
     for (int t = 0; t < num_threads; ++t)
     {
         threads.emplace_back([&, t]()
         {
-            std::mt19937 gen(1000 + t);
-            std::uniform_real_distribution<double> U(a, b);
+            // każdy wątek startuje z tego samego x0
+            auto local_x0 = starting_x_0;
 
-            std::vector<double> x0(n);
-            for (uint32_t i = 0; i < n; ++i)
-                x0[i] = U(gen);
+            // lokalne RNG (ważne!)
+            std::mt19937 gen(1234 + 1000 * t);
+            std::uniform_real_distribution<double> U(0.0, 1.0);
+
+            // mała perturbacja x0, żeby ścieżki się różniły
+            for (auto& xi : local_x0)
+            {
+                xi += 1e-3 * (U(gen) - 0.5);
+            }
 
             auto result = perform_sequential_algorithm(
-                calc_value, x0, n, a, b);
+                calc_value, local_x0, n, a, b);
 
-            best_x[t] = result.first;
-            best_f[t] = result.second;
+            std::lock_guard<std::mutex> lock(best_mutex);
+            if (result.second < best_f)
+            {
+                best_f = result.second;
+                best_x = result.first;
+            }
         });
     }
 
     for (auto& th : threads)
         th.join();
 
-    int best = 0;
-    for (int i = 1; i < num_threads; ++i)
-        if (best_f[i] < best_f[best])
-            best = i;
-
-    return {best_x[best], best_f[best]};
+    return {best_x, best_f};
 }
